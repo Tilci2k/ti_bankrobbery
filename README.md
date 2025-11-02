@@ -47,13 +47,14 @@ A fully featured bank robbery system for Pacific Standard Bank in FiveM QBox ser
 
 ## Installation
 
-### 1. Download & Extract
+1. Download & Extract
+
 Download the latest release and extract to your `resources` folder:
 resources/
 └── [scripts(or wherever you want)]/
 └── ti_bankrobbery/
 
-### 2. Configure Dependencies
+2. Configure Dependencies
 Ensure all required resources are installed and started:
 ```cfg
 ensure qbx_core
