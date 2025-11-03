@@ -8,6 +8,7 @@ local doorLockTimers = {} -- Track door lock timers
 local depositBoxZones = {} -- Track created deposit box zones
 local securitySystemDisabled = false
 local securityFailures = 0
+local lastEventTimes = {} -- Anti-spam protection
 
 -- Timer helper functions
 local timers = {}
@@ -33,6 +34,19 @@ function clearTimeout(timerId)
     timers[timerId] = nil
 end
 
+-- Anti-spam function
+function canTriggerEvent(eventName, cooldown)
+    local currentTime = GetGameTimer()
+    local lastTime = lastEventTimes[eventName] or 0
+    
+    if currentTime - lastTime < (cooldown or 1000) then
+        return false
+    end
+    
+    lastEventTimes[eventName] = currentTime
+    return true
+end
+
 -- Create interaction points using ox_target
 CreateThread(function()
     -- Vault terminal interaction
@@ -46,11 +60,7 @@ CreateThread(function()
                 name = 'bank_vault_terminal',
                 event = 'ti_bankrobbery:client:startVaultHack',
                 icon = 'fas fa-laptop',
-                label = 'Hack Vault Terminal',
-                canInteract = function()
-                    return not hasRobberyStarted and 
-                           (GetGameTimer() - lastRobberyTime) > (Config.Cooldown * 1000)
-                end
+                label = 'Hack Vault Terminal'
             }
         }
     })
@@ -67,12 +77,7 @@ CreateThread(function()
                     name = 'bank_security_terminal',
                     event = 'ti_bankrobbery:client:disableSecurity',
                     icon = 'fas fa-shield-alt',
-                    label = 'Disable Security System (Optional)',
-                    canInteract = function()
-                        return not hasRobberyStarted and 
-                               (GetGameTimer() - lastRobberyTime) > (Config.Cooldown * 1000) and
-                               not securitySystemDisabled
-                    end
+                    label = 'Disable Security System (Optional)'
                 }
             }
         })
@@ -91,9 +96,6 @@ CreateThread(function()
                     event = 'ti_bankrobbery:client:lockpickDoor',
                     icon = 'fas fa-lock',
                     label = 'Lockpick Door',
-                    canInteract = function()
-                        return hasRobberyStarted
-                    end,
                     args = { doorIndex = i }
                 }
             }
@@ -103,6 +105,8 @@ end)
 
 -- Start vault hack
 RegisterNetEvent('ti_bankrobbery:client:startVaultHack', function()
+    if not canTriggerEvent('startVaultHack', 2000) then return end
+    
     local ped = PlayerPedId()
     local pos = GetEntityCoords(ped)
     
@@ -118,6 +122,12 @@ RegisterNetEvent('ti_bankrobbery:client:startVaultHack', function()
             QBX:Notify("You need a " .. Config.VaultTerminal.requiredItem .. "!", "error")
             return
         end
+    end
+    
+    -- Check if robbery is on cooldown (only check if a robbery has actually happened)
+    if hasRobberyStarted or (lastRobberyTime > 0 and (os.time() - lastRobberyTime) < Config.Cooldown) then
+        QBX:Notify("The bank's security system is still active!", "error")
+        return
     end
     
     -- Play animation
@@ -140,7 +150,6 @@ RegisterNetEvent('ti_bankrobbery:client:startVaultHack', function()
     ClearPedTasks(ped)
     
     if success then
-        -- Consume the electronic kit
         TriggerServerEvent('ti_bankrobbery:server:consumeItem', Config.VaultTerminal.requiredItem, 1)
         TriggerServerEvent('ti_bankrobbery:server:vaultHackSuccess')
         hasRobberyStarted = true
@@ -151,6 +160,8 @@ end)
 
 -- Disable security system event (optional - can be done before vault hack)
 RegisterNetEvent('ti_bankrobbery:client:disableSecurity', function()
+    if not canTriggerEvent('disableSecurity', 2000) then return end
+    
     local ped = PlayerPedId()
     local pos = GetEntityCoords(ped)
     
@@ -166,6 +177,12 @@ RegisterNetEvent('ti_bankrobbery:client:disableSecurity', function()
             QBX:Notify("You need a " .. Config.SecuritySystem.requiredItem .. "!", "error")
             return
         end
+    end
+    
+    -- Check if robbery is on cooldown
+    if hasRobberyStarted or (lastRobberyTime > 0 and (os.time() - lastRobberyTime) < Config.Cooldown) then
+        QBX:Notify("The bank's security system is still active!", "error")
+        return
     end
     
     -- Play animation
@@ -188,11 +205,10 @@ RegisterNetEvent('ti_bankrobbery:client:disableSecurity', function()
     ClearPedTasks(ped)
     
     if success then
-        -- Consume the electronic kit
         TriggerServerEvent('ti_bankrobbery:server:consumeItem', Config.SecuritySystem.requiredItem, 1)
         securitySystemDisabled = true
         securityFailures = 0
-        QBX:Notify("Security system disabled! Police dispatch will be delayed by 1 minute.", "success")
+        QBX:Notify("Security system disabled! Police dispatch will be delayed.", "success")
         TriggerServerEvent('ti_bankrobbery:server:securityDisabled')
     else
         securityFailures = securityFailures + 1
@@ -208,21 +224,25 @@ RegisterNetEvent('ti_bankrobbery:client:openVaultDoor', function()
         TriggerEvent('ox_doorlock:setState', Config.VaultDoor.doorId, false) -- false = unlocked/open
         QBX:Notify("Vault door opened!", "success")
         
-        -- Trigger police dispatch based on security system status
+        -- Trigger police dispatch with delay based on security system status
+        local dispatchDelay = 0000 -- Default 5 second delay
         if securitySystemDisabled then
-            -- Delay police dispatch by 1 minute (60000 ms)
-            QBX:Notify("Security system bypassed - police dispatch delayed by 1 minute", "success")
-            setTimeout(function()
-                if hasRobberyStarted then -- Only dispatch if robbery is still active
-                    exports['ps-dispatch']:PacificBankRobbery(1)
+            dispatchDelay = 30000 -- 30 second delay if security is disabled
+        else
+            QBX:Notify("Police will be alerted soon!", "error")
+        end
+        
+        -- Delay the police dispatch
+        setTimeout(function()
+            if hasRobberyStarted then -- Only dispatch if robbery is still active
+                exports['ps-dispatch']:PacificBankRobbery(1)
+                if securitySystemDisabled then
+                    QBX:Notify("Police alerted with delay due to security bypass", "primary")
+                else
                     QBX:Notify("Police have been alerted!", "error")
                 end
-            end, 60000) -- 1 minute delay
-        else
-            -- Immediate police dispatch
-            exports['ps-dispatch']:PacificBankRobbery(1)
-            QBX:Notify("Police have been alerted immediately!", "error")
-        end
+            end
+        end, dispatchDelay)
         
         -- Set timer to lock door after 10 minutes (600000 ms)
         if doorLockTimers.vault then
@@ -242,6 +262,8 @@ end)
 
 -- Lockpick door event
 RegisterNetEvent('ti_bankrobbery:client:lockpickDoor', function(data)
+    if not canTriggerEvent('lockpickDoor', 2000) then return end
+    
     -- Handle different ways ox_target might pass the data
     local doorIndex = nil
     
@@ -257,6 +279,11 @@ RegisterNetEvent('ti_bankrobbery:client:lockpickDoor', function(data)
     
     if not doorIndex then
         QBX:Notify("Invalid door index!", "error")
+        return
+    end
+    
+    if not hasRobberyStarted then
+        QBX:Notify("Robbery hasn't started yet!", "error")
         return
     end
     
@@ -399,9 +426,6 @@ RegisterNetEvent('ti_bankrobbery:client:createDepositBoxZones', function(doorInd
                     event = 'ti_bankrobbery:client:drillBox',
                     icon = 'fas fa-toolbox',
                     label = 'Drill Deposit Box',
-                    canInteract = function()
-                        return hasRobberyStarted
-                    end,
                     args = { doorIndex = doorIndex, boxIndex = i }
                 }
             }
@@ -427,6 +451,8 @@ end)
 
 -- Drill deposit box
 RegisterNetEvent('ti_bankrobbery:client:drillBox', function(data)
+    if not canTriggerEvent('drillBox', 2000) then return end
+    
     local doorIndex = nil
     local boxIndex = nil
     
@@ -443,6 +469,11 @@ RegisterNetEvent('ti_bankrobbery:client:drillBox', function(data)
     
     if not doorIndex or not boxIndex then
         QBX:Notify("Invalid box data!", "error")
+        return
+    end
+    
+    if not hasRobberyStarted then
+        QBX:Notify("Robbery hasn't started yet!", "error")
         return
     end
     
@@ -508,7 +539,7 @@ end)
 -- Reset robbery state and clear door timers
 RegisterNetEvent('ti_bankrobbery:client:resetRobbery', function()
     hasRobberyStarted = false
-    lastRobberyTime = GetGameTimer()
+    lastRobberyTime = os.time()
     securitySystemDisabled = false
     securityFailures = 0
     QBX:Notify("Bank security has been reset", "primary")
@@ -536,49 +567,6 @@ RegisterNetEvent('ti_bankrobbery:client:resetRobbery', function()
         end
     end
 end)
-
--- Test commands
-RegisterCommand('bankrobtestdoor', function(source, args)
-    local playerPed = PlayerPedId()
-    if GetInvokingResource() and GetInvokingResource() ~= "ti_bankrobbery" then return end
-    
-    local doorIndex = tonumber(args[1]) or 1
-    
-    if doorIndex < 1 or doorIndex > #Config.InnerDoors then
-        QBX:Notify("Invalid door index! Use 1-" .. #Config.InnerDoors, "error")
-        return
-    end
-    
-    -- Simulate successful door unlock
-    local doorConfig = Config.InnerDoors[doorIndex]
-    if doorConfig and doorConfig.doorId and doorConfig.doorId > 0 then
-        TriggerEvent('ox_doorlock:setState', doorConfig.doorId, false) -- false = unlocked
-        
-        -- Set timer to lock door after 10 minutes (600000 ms)
-        if doorLockTimers["inner_" .. doorIndex] then
-            clearTimeout(doorLockTimers["inner_" .. doorIndex])
-        end
-        doorLockTimers["inner_" .. doorIndex] = setTimeout(function()
-            if doorConfig.doorId and doorConfig.doorId > 0 then
-                TriggerEvent('ox_doorlock:setState', doorConfig.doorId, true) -- true = locked
-                QBX:Notify("Inner vault door has been secured by the security system", "primary")
-            end
-            doorLockTimers["inner_" .. doorIndex] = nil
-        end, 600000) -- 10 minutes = 600000 ms
-        
-        TriggerServerEvent('ti_bankrobbery:server:doorUnlocked', doorIndex)
-        QBX:Notify("Door " .. doorIndex .. " opened for testing!", "success")
-    end
-end, false)
-
--- Add hint for the command
-RegisterCommand('helpbankrob', function()
-    print("^2=== Bank Robbery Test Commands ===^0")
-    print("^3/bankrobtest start^0 - Bypass terminal and start robbery")
-    print("^3/bankrobtest reset^0 - Reset robbery state")
-    print("^3/bankrobtestdoor [1-2]^0 - Open specific inner door")
-    print("^0")
-end, false)
 
 -- Lock all doors on resource start (to ensure they start locked)
 AddEventHandler('onResourceStart', function(resourceName)

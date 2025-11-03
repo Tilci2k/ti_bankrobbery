@@ -8,13 +8,116 @@ local unlockedDoors = {}
 local robberyStartTime = 0
 local securitySystemDisabled = false
 local securityFailures = 0
+local playerLastEvents = {} -- Anti-spam protection
+local bankPlayers = {} -- Track players in the bank
+
+-- Anti-spam function
+function canPlayerTriggerEvent(src, eventName, cooldown)
+    if not playerLastEvents[src] then
+        playerLastEvents[src] = {}
+    end
+    
+    local currentTime = os.time()
+    local lastTime = playerLastEvents[src][eventName] or 0
+    
+    if currentTime - lastTime < (cooldown or 1) then
+        return false
+    end
+    
+    playerLastEvents[src][eventName] = currentTime
+    return true
+end
+
+-- Validate door index
+function isValidDoorIndex(doorIndex)
+    return doorIndex and type(doorIndex) == "number" and 
+           doorIndex >= 1 and doorIndex <= #Config.InnerDoors
+end
+
+-- Validate box index
+function isValidBoxIndex(doorIndex, boxIndex)
+    if not isValidDoorIndex(doorIndex) then return false end
+    local boxConfig = Config.DepositBoxes[doorIndex]
+    return boxConfig and boxIndex and type(boxIndex) == "number" and
+           boxIndex >= 1 and boxIndex <= #boxConfig.boxes
+end
+
+-- Validate player distance to target
+function isPlayerNearTarget(src, targetCoords, maxDistance)
+    local ped = GetPlayerPed(src)
+    if not ped then return false end
+    
+    local playerCoords = GetEntityCoords(ped)
+    local distance = #(playerCoords - targetCoords)
+    
+    return distance <= (maxDistance or 2.0)
+end
+
+-- Check if player is in bank area
+function isPlayerInBank(src)
+    local ped = GetPlayerPed(src)
+    if not ped then return false end
+    
+    local coords = GetEntityCoords(ped)
+    -- Define bank boundaries (adjust these coordinates for your map)
+    local minX, maxX = 245.0, 275.0
+    local minY, maxY = 210.0, 240.0
+    local minZ, maxZ = 100.0, 110.0
+    
+    return coords.x >= minX and coords.x <= maxX and
+           coords.y >= minY and coords.y <= maxY and
+           coords.z >= minZ and coords.z <= maxZ
+end
+
+-- Smart notification - only alert players in the bank
+function SmartNotify(message, type, excludeSrc)
+    local playersToNotify = {}
+    
+    -- Always notify the triggering player unless excluded
+    if excludeSrc then
+        -- Don't notify the triggering player
+    end
+    
+    -- Notify all players currently in the bank
+    for playerId, _ in pairs(bankPlayers) do
+        if playerId ~= excludeSrc then
+            table.insert(playersToNotify, playerId)
+        end
+    end
+    
+    -- If robbery is active, also notify nearby players
+    if hasRobberyStarted then
+        for _, playerId in ipairs(GetPlayers()) do
+            local playerIdNum = tonumber(playerId)
+            if playerIdNum and playerIdNum ~= excludeSrc then
+                if isPlayerInBank(playerIdNum) then
+                    table.insert(playersToNotify, playerIdNum)
+                end
+            end
+        end
+    end
+    
+    -- Send notifications
+    for _, playerId in ipairs(playersToNotify) do
+        TriggerClientEvent('QBX:Notify', playerId, message, type)
+    end
+    
+    -- Also log to console for admins
+    print("^3[BANK ROBBERY ALERT] " .. message .. "^0")
+end
 
 -- Vault hack success
 RegisterNetEvent('ti_bankrobbery:server:vaultHackSuccess', function()
     local src = source
     local Player = QBX:GetPlayer(src)
     
-    if not Player then return end
+    if not Player or not canPlayerTriggerEvent(src, 'vaultHackSuccess', 2) then return end
+    
+    -- Validate distance to vault terminal
+    if not isPlayerNearTarget(src, Config.VaultTerminal.coords, 3.0) then
+        DropPlayer(src, "Exploit detected: Invalid vault hack location")
+        return
+    end
     
     if hasRobberyStarted then
         DropPlayer(src, "Attempted robbery exploit")
@@ -27,26 +130,37 @@ RegisterNetEvent('ti_bankrobbery:server:vaultHackSuccess', function()
     end
     
     hasRobberyStarted = true
-    robberyStartTime = os.time() -- Track when the robbery actually started
-    -- Don't reset securitySystemDisabled here - it should persist from pre-hack
+    robberyStartTime = os.time()
     
-    -- Open vault door
+    -- Add player to bank tracking
+    bankPlayers[src] = true
+    
     TriggerClientEvent('ti_bankrobbery:client:openVaultDoor', src)
     
-    -- Notify all players
-    TriggerClientEvent('QBX:Notify', -1, "An alarm has been triggered at Pacific Bank!", "error")
+    -- Smart alert - only players in bank area
+    SmartNotify("An alarm has been triggered at Pacific Bank!", "error", src)
     
     print("^2[Pacific Bank Robbery] Started by Player ID: " .. src .. "^0")
 end)
 
--- Security system disabled (optional - can be done before vault hack)
+-- Security system disabled
 RegisterNetEvent('ti_bankrobbery:server:securityDisabled', function()
     local src = source
     local Player = QBX:GetPlayer(src)
     
-    if not Player then return end
+    if not Player or not canPlayerTriggerEvent(src, 'securityDisabled', 2) then return end
+    
+    -- Validate distance to security system
+    if not isPlayerNearTarget(src, Config.SecuritySystem.coords, 3.0) then
+        DropPlayer(src, "Exploit detected: Invalid security system location")
+        return
+    end
     
     securitySystemDisabled = true
+    
+    -- Smart alert - only to the player
+    TriggerClientEvent('QBX:Notify', src, "Security system disabled! Police dispatch will be delayed by 1 minute.", "success")
+    
     print("^2[Pacific Bank Robbery] Security system disabled by Player ID: " .. src .. "^0")
 end)
 
@@ -55,12 +169,17 @@ RegisterNetEvent('ti_bankrobbery:server:securityHackFailed', function(failureCou
     local src = source
     local Player = QBX:GetPlayer(src)
     
-    if not Player then return end
+    if not Player or not canPlayerTriggerEvent(src, 'securityHackFailed', 2) then return end
+    
+    -- Validate distance to security system
+    if not isPlayerNearTarget(src, Config.SecuritySystem.coords, 3.0) then
+        DropPlayer(src, "Exploit detected: Invalid security hack location")
+        return
+    end
     
     local maxFailures = Config.SecuritySystem and Config.SecuritySystem.maxFailures or 2
     
     if failureCount >= (maxFailures + 1) then
-        -- Max failures reached - immediate police dispatch
         local ped = GetPlayerPed(src)
         local coords = GetEntityCoords(ped)
         
@@ -68,7 +187,9 @@ RegisterNetEvent('ti_bankrobbery:server:securityHackFailed', function(failureCou
         exports['ps-dispatch']:PacificBankRobbery(1)
         
         TriggerClientEvent('QBX:Notify', src, "Security breach detected! Police dispatched immediately!", "error")
-        TriggerClientEvent('QBX:Notify', -1, "High priority alert at Pacific Bank!", "error")
+        
+        -- Smart alert - only players in bank area
+        SmartNotify("High priority alert at Pacific Bank!", "error", src)
         
         print("^1[Pacific Bank Robbery] MAX SECURITY FAILURES - Immediate police dispatch by Player ID: " .. src .. "^0")
     else
@@ -81,13 +202,26 @@ RegisterNetEvent('ti_bankrobbery:server:doorUnlocked', function(doorIndex)
     local src = source
     local Player = QBX:GetPlayer(src)
     
-    if not Player then return end
+    if not Player or not canPlayerTriggerEvent(src, 'doorUnlocked', 2) then return end
     if not hasRobberyStarted then return end
+    if not isValidDoorIndex(doorIndex) then 
+        DropPlayer(src, "Exploit detected: Invalid door index")
+        return 
+    end
+    
+    -- Validate distance to door
+    local doorConfig = Config.InnerDoors[doorIndex]
+    if not isPlayerNearTarget(src, doorConfig.coords, 3.0) then
+        DropPlayer(src, "Exploit detected: Invalid door location")
+        return
+    end
     
     unlockedDoors[doorIndex] = true
     
-    -- Create deposit box zones for this door
     TriggerClientEvent('ti_bankrobbery:client:createDepositBoxZones', src, doorIndex)
+    
+    -- Smart alert - only to the player
+    TriggerClientEvent('QBX:Notify', src, "Inner vault door unlocked!", "success")
     
     print("^2[Pacific Bank Robbery] Door " .. doorIndex .. " unlocked by Player ID: " .. src .. "^0")
 end)
@@ -97,7 +231,32 @@ RegisterNetEvent('ti_bankrobbery:server:consumeItem', function(itemName, count, 
     local src = source
     local Player = QBX:GetPlayer(src)
     
-    if not Player then return end
+    if not Player or not canPlayerTriggerEvent(src, 'consumeItem', 1) then return end
+    
+    -- Validate parameters
+    if not itemName or type(itemName) ~= "string" then
+        DropPlayer(src, "Exploit detected: Invalid item name")
+        return
+    end
+    
+    if count and (type(count) ~= "number" or count < 0) then
+        DropPlayer(src, "Exploit detected: Invalid item count")
+        return
+    end
+    
+    if doorIndex and not isValidDoorIndex(doorIndex) then
+        DropPlayer(src, "Exploit detected: Invalid door index")
+        return
+    end
+    
+    -- Validate distance if door index is provided
+    if doorIndex then
+        local doorConfig = Config.InnerDoors[doorIndex]
+        if doorConfig and not isPlayerNearTarget(src, doorConfig.coords, 3.0) then
+            DropPlayer(src, "Exploit detected: Invalid item consumption location")
+            return
+        end
+    end
     
     -- Try to remove the item from player's inventory using proper export
     local success, response = exports.ox_inventory:RemoveItem(src, itemName, count or 1)
@@ -133,15 +292,21 @@ RegisterNetEvent('ti_bankrobbery:server:giveBoxReward', function(doorIndex, boxI
     local src = source
     local Player = QBX:GetPlayer(src)
     
-    if not Player then return end
+    if not Player or not canPlayerTriggerEvent(src, 'giveBoxReward', 2) then return end
     if not hasRobberyStarted then return end
+    if not isValidBoxIndex(doorIndex, boxIndex) then
+        DropPlayer(src, "Exploit detected: Invalid box indices")
+        return
+    end
     
+    -- Validate distance to box
     local boxConfig = Config.DepositBoxes[doorIndex]
-    if not boxConfig or not boxConfig.boxes[boxIndex] then return end
-    
     local box = boxConfig.boxes[boxIndex]
+    if not isPlayerNearTarget(src, box.coords, 3.0) then
+        DropPlayer(src, "Exploit detected: Invalid box location")
+        return
+    end
     
-    -- Check chance
     if box.chance then
         if math.random(1, 100) > box.chance then
             TriggerClientEvent('QBX:Notify', src, "This box was empty!", "error")
@@ -183,17 +348,6 @@ RegisterNetEvent('ti_bankrobbery:server:giveBoxReward', function(doorIndex, boxI
     end
 end)
 
--- Box drilled event
-RegisterNetEvent('ti_bankrobbery:server:boxDrilled', function(doorIndex, boxIndex)
-    local src = source
-    local Player = QBX:GetPlayer(src)
-    
-    if not Player then return end
-    if not hasRobberyStarted then return end
-    
-    print("^2[Pacific Bank Robbery] Box " .. boxIndex .. " in door " .. doorIndex .. " drilled by Player ID: " .. src .. "^0")
-end)
-
 -- Reset robbery after cooldown
 CreateThread(function()
     while true do
@@ -206,6 +360,7 @@ CreateThread(function()
             robberyStartTime = 0
             securitySystemDisabled = false
             securityFailures = 0
+            bankPlayers = {} -- Clear bank player tracking
             
             -- Lock all doors and remove deposit boxes
             TriggerClientEvent('ti_bankrobbery:client:resetRobbery', -1)
@@ -215,24 +370,9 @@ CreateThread(function()
     end
 end)
 
--- Get robbery status (for other resources to check)
-lib.callback.register('ti_bankrobbery:getRobberyStatus', function()
-    return {
-        started = hasRobberyStarted,
-        lastTime = lastRobberyTime,
-        cooldown = Config.Cooldown,
-        unlockedDoors = unlockedDoors,
-        securityDisabled = securitySystemDisabled,
-        securityFailures = securityFailures
-    }
-end)
-
 -- Force reset command (for admins)
 RegisterCommand("resetbankrobbery", function(source, args)
-    if not QBX:HasPermission(source, 'admin') then 
-        TriggerClientEvent('QBX:Notify', source, "Insufficient permissions!", "error")
-        return 
-    end
+    if not QBX:HasPermission(source, 'admin') then return end
     
     hasRobberyStarted = false
     lastRobberyTime = 0
@@ -240,6 +380,7 @@ RegisterCommand("resetbankrobbery", function(source, args)
     robberyStartTime = 0
     securitySystemDisabled = false
     securityFailures = 0
+    bankPlayers = {}
     
     TriggerClientEvent('ti_bankrobbery:client:resetRobbery', -1)
     TriggerClientEvent('QBX:Notify', source, "Bank robbery system reset!", "success")
@@ -266,6 +407,7 @@ RegisterCommand("bankrobtest", function(source, args)
         robberyStartTime = os.time() -- Track when the robbery actually started
         securitySystemDisabled = false
         securityFailures = 0
+        bankPlayers[source] = true
         TriggerClientEvent('ti_bankrobbery:client:openVaultDoor', source)
         TriggerClientEvent('QBX:Notify', source, "Bank robbery test started - vault door opened!", "success")
         print("^3[ADMIN] Bank robbery test started by Player ID: " .. source .. "^0")
@@ -277,6 +419,7 @@ RegisterCommand("bankrobtest", function(source, args)
         robberyStartTime = 0
         securitySystemDisabled = false
         securityFailures = 0
+        bankPlayers = {}
         TriggerClientEvent('ti_bankrobbery:client:resetRobbery', -1)
         TriggerClientEvent('QBX:Notify', source, "Bank robbery test reset!", "success")
         print("^3[ADMIN] Bank robbery test reset by Player ID: " .. source .. "^0")
@@ -284,3 +427,9 @@ RegisterCommand("bankrobtest", function(source, args)
         TriggerClientEvent('QBX:Notify', source, "Usage: /bankrobtest [start/reset]", "error")
     end
 end, true)
+
+-- Track player disconnects
+AddEventHandler('playerDropped', function()
+    local src = source
+    bankPlayers[src] = nil
+end)

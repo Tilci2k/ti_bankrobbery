@@ -23,7 +23,7 @@ return {
             columns = 2,
             viewTime = 15,
             typeTime = 25,
-            answersNeeded = 5
+            answersNeeded = 4
         },
         maxFailures = 2, -- Max failures before immediate police call
         policeCallDelay = 0 -- 5 minutes delay for police call after max failures (set to 0 for immediate)
@@ -71,9 +71,9 @@ return {
         {
             doorId = "inner_vault_2",
             boxes = {
-                { coords = vector3(250.5, 233.0, 101.7), reward = "goldbar", chance = 100 },
-                { coords = vector3(250.2, 233.5, 101.7), reward = "markedbills", amount = {1000, 5000}, chance = 90 },
-                { coords = vector3(249.9, 234.0, 101.7), reward = "diamond", chance = 30 }
+                { coords = vector3(263.21, 212.04, 101.91), reward = "goldbar", chance = 100 },
+                { coords = vector3(266.35, 213.39, 101.88), reward = "markedbills", amount = {1000, 5000}, chance = 90 },
+                { coords = vector3(264.81, 216.45, 102.0), reward = "diamond", chance = 30 }
             }
         }
     },
